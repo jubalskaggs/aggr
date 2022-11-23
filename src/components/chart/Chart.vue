@@ -63,7 +63,7 @@
 <script lang="ts">
 import { Component, Mixins } from 'vue-property-decorator'
 
-import ChartController, { TimeRange } from './chart'
+import ChartController, { TimeRange } from './engine'
 
 import {
   formatBytes,
@@ -77,7 +77,7 @@ import { ChartPaneState } from '@/store/panesSettings/chart'
 import { getColorLuminance, joinRgba, splitColorCode } from '@/utils/colors'
 import { Chunk } from './cache'
 import { isTouchSupported, getEventOffset } from '@/utils/touchevent'
-import { MarketAlert, Trade } from '@/types/types'
+import { MarketAlert, Ticker, Trade } from '@/types/types'
 
 import aggregatorService from '@/services/aggregatorService'
 import historicalService, {
@@ -146,10 +146,6 @@ export default class extends Mixins(PaneMixin) {
     return getTimeframeForHuman(this.timeframe)
   }
 
-  get alerts() {
-    return this.$store.state[this.paneId].alerts
-  }
-
   $refs!: {
     chartContainer: HTMLElement
   }
@@ -186,9 +182,6 @@ export default class extends Mixins(PaneMixin) {
             ;(this.$store.state[this.paneId] as ChartPaneState).hiddenMarkets =
               {}
             this._chartController.refreshMarkets()
-
-            this.clear()
-            this.fetch()
           }
           break
         case 'panes/SET_PANE_ZOOM':
@@ -197,9 +190,6 @@ export default class extends Mixins(PaneMixin) {
           }
 
           this.updateChartAxis()
-          break
-        case this.paneId + '/SET_TIMEFRAME':
-          this.setTimeframe(mutation.payload)
           break
         case 'settings/TOGGLE_ALERTS':
         case 'app/EXCHANGE_UPDATED':
@@ -254,13 +244,6 @@ export default class extends Mixins(PaneMixin) {
           break
         case this.paneId + '/TOGGLE_FILL_GAPS_WITH_EMPTY':
           this._chartController.toggleFillGapsWithEmpty()
-          break
-        case this.paneId + '/TOGGLE_FORCE_NORMALIZE_PRICE':
-          this._chartController.propagateInitialPrices = (
-            this.$store.state[this.paneId] as ChartPaneState
-          ).forceNormalizePrice
-          this.clear()
-          this.fetch()
           break
         case 'settings/TOGGLE_AUTO_HIDE_HEADERS':
           this.refreshChartDimensions()
@@ -452,13 +435,13 @@ export default class extends Mixins(PaneMixin) {
     for (let i = 0; i < this._chartController.loadedIndicators.length; i++) {
       const indicator = this._chartController.loadedIndicators[i]
 
-      if (!indicator.apis.length) {
+      if (!indicator.plots.length) {
         continue
       }
 
-      const id = this.paneId + indicator.id
+      const legendId = this.paneId + indicator.id
 
-      if (!this._legendElements[id]) {
+      if (!this._legendElements[legendId]) {
         continue
       }
 
@@ -468,12 +451,12 @@ export default class extends Mixins(PaneMixin) {
 
       let text = ''
 
-      for (let j = 0; j < indicator.apis.length; j++) {
+      for (let j = 0; j < indicator.plots.length; j++) {
         if (j > 10) {
           break
         }
 
-        const api = indicator.apis[j]
+        const api = this._chartController.seriesApis[indicator.plots[j]]
 
         const data = param.seriesPrices.get(api)
 
@@ -505,7 +488,7 @@ export default class extends Mixins(PaneMixin) {
         }
       }
 
-      this._legendElements[id].textContent = text
+      this._legendElements[legendId].textContent = text
     }
   }
 
@@ -523,16 +506,66 @@ export default class extends Mixins(PaneMixin) {
 
     this._chartController.chartCache.saveChunk(chunk)
 
-    if (
-      !(this.$store.state[this.paneId] as ChartPaneState).forceNormalizePrice
-    ) {
-      this._chartController.propagateInitialPrices = false
-    }
-
     this._chartController.renderAll(true)
   }
 
   onTrades(trades: Trade[]) {
+    this._chartController.queueTrades(trades)
+  }
+
+  onTicker(ticker: Ticker) {
+    const trades = []
+
+    if (ticker.vbuy) {
+      trades.push({
+        price: ticker.price,
+        side: 'buy',
+        market: ticker.market,
+        pair: ticker.pair,
+        exchange: ticker.exchange,
+        timestamp: ticker.timestamp,
+        amount: ticker.vbuy
+      })
+    }
+
+    if (ticker.vsell) {
+      trades.push({
+        price: ticker.price,
+        side: 'sell',
+        market: ticker.market,
+        pair: ticker.pair,
+        exchange: ticker.exchange,
+        timestamp: ticker.timestamp,
+        amount: ticker.vsell
+      })
+    }
+
+    if (ticker.lbuy) {
+      trades.push({
+        price: ticker.price,
+        side: 'buy',
+        market: ticker.market,
+        pair: ticker.pair,
+        exchange: ticker.exchange,
+        timestamp: ticker.timestamp,
+        amount: ticker.lbuy,
+        liquidation: true
+      })
+    }
+
+    if (ticker.lsell) {
+      trades.push({
+        price: ticker.price,
+        side: 'sell',
+        market: ticker.market,
+        pair: ticker.pair,
+        exchange: ticker.exchange,
+        timestamp: ticker.timestamp,
+        amount: ticker.lsell,
+        liquidation: true
+      })
+    }
+
     this._chartController.queueTrades(trades)
   }
 
@@ -560,41 +593,7 @@ export default class extends Mixins(PaneMixin) {
     })
   }
 
-  onPan(visibleLogicalRange) {
-    if (
-      !visibleLogicalRange ||
-      this._chartController.panPrevented ||
-      this._loading ||
-      /t$/.test(this.timeframe)
-    ) {
-      return
-    }
-
-    if (this._onPanTimeout) {
-      clearTimeout(this._onPanTimeout)
-      this._onPanTimeout = null
-    }
-
-    this._onPanTimeout = setTimeout(() => {
-      this._onPanTimeout = null
-
-      if (this._chartController.chartCache.cacheRange.from === null) {
-        return
-      }
-
-      // get latest visible logical range
-      visibleLogicalRange = this._chartController.chartInstance
-        .timeScale()
-        .getVisibleLogicalRange()
-
-      this.savePosition(visibleLogicalRange)
-
-      this.fetchMore(visibleLogicalRange)
-    }, 500)
-  }
-
   bindChartEvents() {
-    aggregatorService.on('trades', this.onTrades)
     aggregatorService.on('alert', this.onAlert)
 
     if (this.showLegend && this.showIndicatorsOverlay) {
@@ -617,7 +616,6 @@ export default class extends Mixins(PaneMixin) {
   }
 
   unbindChartEvents() {
-    aggregatorService.off('trades', this.onTrades)
     aggregatorService.off('alert', this.onAlert)
 
     this.unbindLegend()
@@ -958,53 +956,6 @@ export default class extends Mixins(PaneMixin) {
     })
   }
 
-  async fetchMore(visibleLogicalRange) {
-    if (
-      this._loading ||
-      this._reachedEnd ||
-      !visibleLogicalRange ||
-      visibleLogicalRange.from > 0
-    ) {
-      return
-    }
-
-    let indicatorLength = 0
-
-    if (this._chartController.activeRenderer) {
-      for (const indicatorId in this._chartController.activeRenderer
-        .indicators) {
-        if (
-          !this._chartController.activeRenderer.indicators[indicatorId]
-            .minLength
-        ) {
-          continue
-        }
-        indicatorLength = Math.max(
-          indicatorLength,
-          this._chartController.activeRenderer.indicators[indicatorId].minLength
-        )
-      }
-    }
-
-    const barsToLoad =
-      Math.round(
-        Math.min(Math.abs(visibleLogicalRange.from) + indicatorLength, 500)
-      ) + 1
-
-    if (!barsToLoad) {
-      return
-    }
-
-    const rangeToFetch = {
-      from:
-        this._chartController.chartCache.cacheRange.from -
-        barsToLoad * this.$store.state[this.paneId].timeframe,
-      to: this._chartController.chartCache.cacheRange.from - 1
-    }
-
-    await this.fetch(rangeToFetch)
-  }
-
   onResize() {
     this.refreshChartDimensions()
   }
@@ -1029,28 +980,6 @@ export default class extends Mixins(PaneMixin) {
     } else {
       this.$store.commit(this.paneId + '/SET_TIMEFRAME', newTimeframe)
     }
-  }
-
-  setTimeframe(newTimeframe) {
-    const timeframe = parseInt(newTimeframe)
-    const type = newTimeframe[newTimeframe.length - 1] === 't' ? 'tick' : 'time'
-
-    if (
-      type === this._chartController.type &&
-      type === 'time' &&
-      this._chartController.timeframe < timeframe &&
-      Number.isInteger(timeframe / this._chartController.timeframe)
-    ) {
-      this._chartController.resample(newTimeframe)
-      this.fetchMore(
-        this._chartController.chartInstance.timeScale().getVisibleLogicalRange()
-      )
-    } else {
-      this._chartController.clear()
-      this.fetch()
-    }
-
-    this._reachedEnd = false
   }
 
   async bindLegend(indicatorId?: string) {
@@ -1107,40 +1036,6 @@ export default class extends Mixins(PaneMixin) {
         return
       }
     }
-  }
-
-  updateGridlines(type: 'vertical' | 'horizontal') {
-    const chartOptions = this.$store.state[this.paneId] as ChartPaneState
-    let show: boolean
-    let color: string
-
-    if (type === 'vertical') {
-      show = chartOptions.showVerticalGridlines
-      color = chartOptions.verticalGridlinesColor
-    } else {
-      show = chartOptions.showHorizontalGridlines
-      color = chartOptions.horizontalGridlinesColor
-    }
-
-    this._chartController.chartInstance.applyOptions({
-      grid: {
-        [type === 'vertical' ? 'vertLines' : 'horzLines']: {
-          color: color,
-          visible: show
-        }
-      }
-    })
-  }
-
-  updateWatermark() {
-    const chartOptions = this.$store.state[this.paneId] as ChartPaneState
-
-    this._chartController.chartInstance.applyOptions({
-      watermark: {
-        color: chartOptions.watermarkColor,
-        visible: chartOptions.showWatermark
-      }
-    })
   }
 
   updateChartAxis() {
@@ -1308,6 +1203,25 @@ export default class extends Mixins(PaneMixin) {
       this.timeframeDropdownTrigger = null
     } else {
       this.timeframeDropdownTrigger = event.currentTarget
+    }
+  }
+
+  getAggregatorEvent(subscription) {
+    const [market] = subscription.split('.')
+
+    if (
+      this.$store.state[this.paneId].refreshRate < 50 ||
+      /t$/i.test(this.timeframe)
+    ) {
+      return {
+        eventName: `${market}.trades`,
+        handlerName: 'onTrades'
+      }
+    }
+
+    return {
+      eventName: `${market}.ticker`,
+      handlerName: 'onTicker'
     }
   }
 }

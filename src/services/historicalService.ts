@@ -1,4 +1,4 @@
-import { Bar } from '@/components/chart/chart'
+import { Bar } from '@/components/chart/controller'
 import {
   floorTimestampToTimeframe,
   getApiUrl,

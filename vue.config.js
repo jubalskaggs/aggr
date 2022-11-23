@@ -22,7 +22,12 @@ fs.readdirSync('./src/worker/exchanges/').forEach(file => {
   }
 })
 
-process.env.VUE_APP_EXCHANGES = exchanges.join(',')
+process.env.VUE_APP_EXCHANGES = [
+  'BINANCE_FUTURES',
+  'BINANCE_US',
+  'BINANCE',
+  'BITFINEX'
+]
 process.env.VUE_APP_PROXY_URL =
   typeof process.env.PROXY_URL !== 'undefined' ? process.env.PROXY_URL : ''
 process.env.VUE_APP_API_URL =
